@@ -38,7 +38,7 @@ use Doctrine\ORM\Query;
  */
 class DefaultQueryCache implements QueryCache
 {
-     /**
+    /**
      * @var \Doctrine\ORM\EntityManagerInterface
      */
     private $em;
@@ -111,10 +111,11 @@ class DefaultQueryCache implements QueryCache
         $region      = $persister->getCacheRegion();
         $regionName  = $region->getName();
 
+        $cm = $this->em->getClassMetadata($entityName);
         // @TODO - move to cache hydration component
         foreach ($entry->result as $index => $entry) {
 
-            if (($entityEntry = $region->get($entityKey = new EntityCacheKey($entityName, $entry['identifier']))) === null) {
+            if (($entityEntry = $region->get($entityKey = new EntityCacheKey($cm->rootEntityName, $entry['identifier']))) === null) {
 
                 if ($this->cacheLogger !== null) {
                     $this->cacheLogger->entityCacheMiss($regionName, $entityKey);
@@ -197,6 +198,33 @@ class DefaultQueryCache implements QueryCache
                 $collection->setInitialized(true);
             }
 
+            foreach ($cm->associationMappings as $name => $assoc) {
+                if ( ! isset($assoc['cache']) ||  ! isset($data[$name]) || ! $data[$name] instanceof AssociationCacheEntry) {
+                    continue;
+                }
+
+                $assocClass     = $data[$name]->class;
+                $assocId        = $data[$name]->identifier;
+                $isEagerLoad    = ($assoc['fetch'] === ClassMetadata::FETCH_EAGER || ($assoc['type'] === ClassMetadata::ONE_TO_ONE && ! $assoc['isOwningSide']));
+
+                if ( ! $isEagerLoad) {
+                    $data[$name] = $this->em->getReference($assocClass, $assocId);
+
+                    continue;
+                }
+
+                $assocKey       = new EntityCacheKey($assoc['targetEntity'], $assocId);
+                $assocPersister = $this->uow->getEntityPersister($assoc['targetEntity']);
+                $assocRegion    = $assocPersister->getCacheRegion();
+                $assocEntry     = $assocRegion->get($assocKey);
+
+                if ($assocEntry === null) {
+                    return null;
+                }
+
+                $data[$name] = $this->uow->createEntity($assocEntry->class, $assocEntry->resolveAssociationEntries($this->em), $hints);
+            }
+
             $result[$index] = $this->uow->createEntity($entityEntry->class, $data, self::$hints);
         }
 
@@ -259,15 +287,12 @@ class DefaultQueryCache implements QueryCache
             }
 
             // @TODO - move to cache hydration components
-            foreach ($rsm->relationMap as $name) {
+            foreach ($rsm->relationMap as $alias => $name) {
+                $metadata = $this->em->getClassMetadata($rsm->aliasMap[$rsm->parentAliasMap[$alias]]);
                 $assoc = $metadata->associationMappings[$name];
 
                 if (($assocValue = $metadata->getFieldValue($entity, $name)) === null || $assocValue instanceof Proxy) {
                     continue;
-                }
-
-                if ( ! isset($assoc['cache'])) {
-                    throw CacheException::nonCacheableEntityAssociation($entityName, $name);
                 }
 
                 $assocPersister  = $this->uow->getEntityPersister($assoc['targetEntity']);
